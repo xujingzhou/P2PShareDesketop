@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Screen Sharing</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+</head>
+<body>
+  <h1>
+    共享桌面
+  </h1>
+
+  <section class="make-center">
+    <p style="margin: 0; padding: 0; padding-bottom: 20px;">
+      <input type="text" id="room-id" value="abcdef" autocorrect=off autocapitalize=off size=20>
+      <button id="join-room">加入房间</button>
+      <button id="share-screen" disabled>共享桌面</button>
+
+      <div style="font-size:14px;color:#0000FF" class="make-center" id="broadcast-viewers-counter"></div>
+    </p>
+
+    <!-- <video id="video-preview" controls loop></video> -->
+    <div id="videos-container" style="margin: 20px 0;"></div>
+  </section>
+
+<script src="/RTCPeerConnectionEx.js"></script>
+<script src="/adapter-latest.js"></script>
+<script src="/socketio.js"></script>
+
+<link rel="stylesheet" href="/getHTMLMediaElement.css">
+<script src="/getHTMLMediaElement.js"></script>
+
+<script>
+
+var connection = new RTCPeerConnectionEx();
+connection.socketURL = '/';
+connection.socketMessageEvent = 'video-screen-sharing';
+connection.enableBroadcast = true;
+connection.maxRelayCountPerUser = 2;
+
+connection.session = {
+    audio: true,
+    video: true
+};
+
+connection.sdpConstraints.mandatory = {
+    OfferToReceiveAudio: true,
+    OfferToReceiveVideo: true
+};
+
+connection.iceServers = [
+	{
+		credential: "123456",
+		username: "admin",
+		urls: [
+		  "stun:18.162.113.79:3478",
+		]
+	},
+			
+	// {
+	// 	credential: "123456",
+	// 	username: "admin",
+	// 	urls: [
+	// 		"turn:3.84.126.93:3478",
+	// 	]
+	// },
+];
+
+connection.connectSocket(function(socket) {
+    socket.on('logs', function(log) {
+        document.querySelector('h1').innerHTML = log.replace(/</g, '----').replace(/>/g, '___').replace(/----/g, '(<span style="color:red;">').replace(/___/g, '</span>)');
+    });
+
+    socket.on('join-broadcaster', function(hintsToJoinBroadcast) {
+        console.log('join-broadcaster', hintsToJoinBroadcast);
+
+        connection.session = hintsToJoinBroadcast.typeOfStreams;
+        connection.sdpConstraints.mandatory = {
+            OfferToReceiveVideo: !!connection.session.video,
+            OfferToReceiveAudio: !!connection.session.audio
+        };
+        connection.broadcastId = hintsToJoinBroadcast.broadcastId;
+        connection.join(hintsToJoinBroadcast.userid, function() {
+          afterOpenOrJoin();
+      });
+    });
+
+    socket.on('start-broadcasting', function(typeOfStreams) {
+        console.log('start-broadcasting', typeOfStreams);
+
+        connection.sdpConstraints.mandatory = {
+            OfferToReceiveVideo: false,
+            OfferToReceiveAudio: false
+        };
+        connection.session = typeOfStreams;
+
+        connection.open(connection.userid);
+    });
+	
+	socket.on('rejoin-broadcast', function(broadcastId) {
+        console.log('rejoin-broadcast', broadcastId);
+
+        connection.attachStreams = [];
+        socket.emit('check-broadcast-presence', broadcastId, function(isBroadcastExists) {
+            if (!isBroadcastExists) {
+                connection.userid = broadcastId;
+            }
+
+            socket.emit('join-broadcast', {
+                broadcastId: broadcastId,
+                userid: connection.userid,
+                typeOfStreams: connection.session
+            });
+        });
+    });
+
+    socket.on('broadcast-stopped', function(broadcastId) {
+        console.debug('broadcast-stopped', broadcastId);
+        alert('本次直播已经结束！');
+    });
+    
+});
+
+// to do list
+function isRelayServer() {
+
+    if (getNATType() == "fullcone") {
+        connection.socket && connection.socket.emit('is-relay-server');
+    }
+    else {
+        connection.socket && connection.socket.emit('is-not-relay-server');
+    }
+}
+
+// to do list
+function getNATType() {
+    return "fullcone";
+}
+
+function getTracks(stream, kind) {
+	if (!stream || !stream.getTracks) {
+		return [];
+	}
+
+	return stream.getTracks().filter(function(t) {
+		return t.kind === (kind || 'audio');
+	});
+}
+
+var RMCMediaTrack = {
+    cameraStream: null,
+    cameraTrack: null,
+    screen: null
+};
+connection.videosContainer = document.getElementById('videos-container');
+connection.onstream = function(event) {
+    if (connection.isInitiator && event.type !== 'local') {
+        return;
+    }
+
+	if (!event.stream) {
+		return;
+	}
+
+    {
+        var existing = document.getElementById(event.streamid);
+        if(existing && existing.parentNode) {
+             existing.parentNode.removeChild(existing);
+        }
+
+        if(event.type === 'local' && event.stream.isVideo) {
+            console.log("event.type === local && event.stream.isVideo");
+
+            RMCMediaTrack.cameraStream = event.stream;
+            RMCMediaTrack.cameraTrack = this.getTracks(event.stream, 'video')[0];
+        }
+
+        event.mediaElement.removeAttribute('src');
+        event.mediaElement.removeAttribute('srcObject');
+        event.mediaElement.muted = true;
+        event.mediaElement.volume = 0;
+
+        var video = document.createElement('video');
+
+        try {
+            video.setAttributeNode(document.createAttribute('autoplay'));
+            video.setAttributeNode(document.createAttribute('playsinline'));
+        } catch (e) {
+            video.setAttribute('autoplay', true);
+            video.setAttribute('playsinline', true);
+        }
+
+        if(event.type === 'local') {
+            video.volume = 0;
+            try {
+                video.setAttributeNode(document.createAttribute('muted'));
+            } catch (e) {
+                video.setAttribute('muted', true);
+            }
+        }
+        video.srcObject = event.stream;
+
+        var width = parseInt(connection.videosContainer.clientWidth / 3) - 20;
+        var mediaElement = getHTMLMediaElement(video, {
+            title: event.userid,
+            buttons: ['full-screen'],
+            width: width,
+            showOnMouseEnter: false
+        });
+
+        connection.videosContainer.appendChild(mediaElement);
+
+        setTimeout(function() {
+            mediaElement.media.play();
+        }, 3000);
+
+        mediaElement.id = event.streamid;
+
+        RMCMediaTrack.selfVideo = mediaElement.media;
+
+        RMCMediaTrack.userid = event.userid;
+        connection.isUpperUserLeft = false;
+
+        if (connection.isInitiator == false && event.type === 'remote') {
+            connection.dontCaptureUserMedia = true;
+            connection.attachStreams = [event.stream];
+            connection.sdpConstraints.mandatory = {
+                OfferToReceiveAudio: false,
+                OfferToReceiveVideo: false
+            };
+
+            connection.getSocket(function(socket) {
+                socket.emit('can-relay-broadcast');
+
+                connection.getAllParticipants().forEach(function(p) {
+                    if (p + '' != event.userid + '') {
+                        connection.replaceTrack(event.stream, p);
+                    }
+                });
+            });
+        }
+    }
+};
+
+connection.onstreamended = function(event) {
+    var mediaElement = document.getElementById(event.streamid);
+    if (mediaElement) {
+        mediaElement.parentNode.removeChild(mediaElement);
+    }
+};
+
+connection.onMediaError = function(e) {
+    if (e.message === 'Concurrent mic process limit.') {
+        if (DetectRTC.audioInputDevices.length <= 1) {
+            alert('Please select external microphone.');
+            return;
+        }
+
+        var secondaryMic = DetectRTC.audioInputDevices[1].deviceId;
+        connection.mediaConstraints.audio = {
+            deviceId: secondaryMic
+        };
+
+        connection.join(connection.sessionid);
+    }
+};
+
+connection.onNumberOfBroadcastViewersUpdated = function(event) {
+    if (!connection.isInitiator) return;
+
+    document.getElementById('broadcast-viewers-counter').innerHTML = '参与人数: <b>' + event.numberOfBroadcastViewers + '</b>';
+};
+
+connection.onleave = function(event) {
+    if (event.userid !== RMCMediaTrack.userid) return;
+
+    connection.getSocket(function(socket) {
+        socket.emit('can-not-relay-broadcast');
+
+        connection.isUpperUserLeft = true;
+    });
+};
+
+document.getElementById('join-room').onclick = function() {
+    disableInputButtons();
+    
+    var roomid = document.getElementById('room-id').value;
+    if (roomid.replace(/^\s+|\s+$/g, '').length <= 0) {
+        alert('请输入房间名称！');
+        document.getElementById('room-id').focus();
+        return;
+    }
+
+    var broadcastId = roomid;
+    connection.extra.broadcastId = broadcastId;
+    connection.session = {
+        audio: true,
+        video: true,
+        oneway: true
+    };
+
+    beforeOpenOrJoin(roomid, function() {
+        connection.getSocket(function(socket) {
+            console.debug('join-room -- connection.getSocket');
+            socket.emit('check-broadcast-presence', broadcastId, function(isBroadcastExists) {
+
+                if (!isBroadcastExists) {
+                    connection.userid = broadcastId;
+                }
+
+                console.log('join-room -- check-broadcast-presence - (broadcastId, userid, isBroadcastExists)', broadcastId, connection.userid, isBroadcastExists);
+
+                socket.emit('join-broadcast', {
+                    broadcastId: broadcastId,
+                    userid: connection.userid,
+                    typeOfStreams: connection.session
+                });
+            });
+        });
+      });
+};
+
+function disableInputButtons() {
+    document.getElementById('room-id').onkeyup();
+
+    document.getElementById('join-room').disabled = true;
+    document.getElementById('room-id').disabled = true;
+}
+
+var roomid = '';
+if (localStorage.getItem(connection.socketMessageEvent)) {
+    roomid = localStorage.getItem(connection.socketMessageEvent);
+} else {
+    roomid = connection.token();
+}
+var txtRoomId = document.getElementById('room-id');
+txtRoomId.value = roomid;
+txtRoomId.onkeyup = txtRoomId.oninput = txtRoomId.onpaste = function() {
+    localStorage.setItem(connection.socketMessageEvent, document.getElementById('room-id').value);
+};
+
+function beforeOpenOrJoin(roomid, callback) {
+    connection.socketCustomEvent = roomid;
+    callback();
+}
+
+function afterOpenOrJoin() {
+    connection.socket.on(connection.socketCustomEvent, function(message) {
+        if (message.userid === connection.userid) return; // ignore self messages
+
+        if (message.justSharedMyScreen === true) {
+            var video = document.getElementById(message.userid);
+            if (video) {
+               
+            }
+        }
+
+        if (message.justStoppedMyScreen === true) {
+            var video = document.getElementById(message.userid);
+            if (video) {
+                video.querySelector('video').srcObject = null;
+            }
+        }
+    });
+}
+
+var btnShareScreen = document.getElementById('share-screen');
+connection.onUserStatusChanged = function() {
+    btnShareScreen.disabled = connection.getAllParticipants().length <= 0;
+};
+
+btnShareScreen.onclick = function() {
+    this.disabled = true;
+
+    getScreenStream(function(screen) {
+        var isLiveSession = connection.getAllParticipants().length > 0;
+        if (isLiveSession) {
+            replaceTrack(RMCMediaTrack.screen);
+        }
+
+        connection.attachStreams.forEach(function(stream) {
+            this.getTracks(stream, 'video').forEach(function(track) {
+                stream.removeTrack(track);
+            });
+
+            stream.addTrack(RMCMediaTrack.screen);
+        });
+    });
+};
+
+var screen_constraints = {
+  video: {
+    cursor: "always"
+  },
+  audio: true
+};
+
+function screenHelper(callback) {
+    if(navigator.mediaDevices.getDisplayMedia) {
+        navigator.mediaDevices.getDisplayMedia(screen_constraints).then(stream => {
+            callback(stream);
+        }, error => {
+            alert('getDisplayMedia API is not available in this browser.');
+        });
+    }
+    else if(navigator.getDisplayMedia) {
+        navigator.getDisplayMedia(screen_constraints).then(stream => {
+            callback(stream);
+        }, error => {
+            alert('getDisplayMedia API is not available in this browser.');
+        });
+    }
+    else {
+        alert('getDisplayMedia API is not available in this browser.');
+    }
+}
+
+function getScreenStream(callback) {
+      screenHelper(function(screen) {
+            RMCMediaTrack.screen = this.getTracks(screen, 'video')[0];
+            RMCMediaTrack.selfVideo = screen;
+
+            (function looper() {
+                // readyState can be "live" or "ended"
+                if (RMCMediaTrack.screen.readyState === 'ended') {
+                    RMCMediaTrack.screen.onended();
+                    return;
+                }
+                setTimeout(looper, 1000);
+            })();
+
+            var firedOnce = false;
+            RMCMediaTrack.screen.onended = RMCMediaTrack.screen.onmute = RMCMediaTrack.screen.oninactive = function() {
+  
+                if (firedOnce) return;
+                firedOnce = true;
+
+                console.log("RMCMediaTrack.screen.onended = RMCMediaTrack.screen.onmute = RMCMediaTrack.screen.oninactive");
+
+                if (getTracks(RMCMediaTrack.cameraStream, 'video')[0].readyState) {
+                    getTracks(RMCMediaTrack.cameraStream, 'video').forEach(function(track) {
+                        RMCMediaTrack.cameraStream.removeTrack(track);
+                    });
+                    RMCMediaTrack.cameraStream.addTrack(RMCMediaTrack.cameraTrack);
+                }
+
+                RMCMediaTrack.selfVideo = RMCMediaTrack.cameraStream;
+
+                connection.socket && connection.socket.emit(connection.socketCustomEvent, {
+                    justStoppedMyScreen: true,
+                    userid: connection.userid
+                });
+
+                replaceTrack(RMCMediaTrack.cameraTrack);
+                connection.attachStreams = [RMCMediaTrack.cameraStream];
+                btnShareScreen.disabled = false;
+            };
+
+            connection.socket && connection.socket.emit(connection.socketCustomEvent, {
+                justSharedMyScreen: true,
+                userid: connection.userid
+            });
+
+            callback(screen);
+        });
+}
+
+function replaceTrack(videoTrack) {
+    if (!videoTrack) return;
+	
+    if (videoTrack.readyState === 'ended') {
+        alert('Can not replace an "ended" track. track.readyState: ' + videoTrack.readyState);
+        return;
+    }
+	
+    connection.getAllParticipants().forEach(function(pid) {
+        var peer = connection.peers[pid].peer;
+        if (!peer.getSenders) return;
+
+        var trackToReplace = videoTrack;
+        peer.getSenders().forEach(function(sender) {
+            if (!sender || !sender.track) return;
+
+            if (sender.track.kind === 'video' && trackToReplace) {
+                sender.replaceTrack(trackToReplace);
+                trackToReplace = null;
+            }
+        });
+    });
+}
+</script>
+
+</body>
+</html>

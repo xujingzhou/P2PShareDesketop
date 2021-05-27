@@ -1,0 +1,14 @@
+{
+  "name": "webrtc-screen-sharing",
+  "preferGlobal": false,
+  "version": "1.0.0",
+  "description": "screen sharing",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "main": "./server.js",
+  "analyze": false,
+  "dependencies": {
+    "socket.io": "^3.1.0"
+  }
+}
